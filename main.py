@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, String, Boolean
 from sqlalchemy.ext.declarative import declarative_base
@@ -8,27 +8,20 @@ from passlib.context import CryptContext
 from datetime import datetime, timedelta
 import jwt
 
-
 SQLALCHEMY_DATABASE_URL = "postgresql://postgres:12345@localhost/chat_app"
 Base = declarative_base()
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
-
 SECRET_KEY = "hassan"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-
 app = FastAPI()
 
-
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-
-
 
 class User(Base):
     __tablename__ = "users"
@@ -39,50 +32,46 @@ class User(Base):
     hashed_password = Column(String)
     is_online = Column(Boolean, default=False)
 
-
+    answer1_hashed = Column(String, nullable=False)
+    answer2_hashed = Column(String, nullable=False)
+    answer3_hashed = Column(String, nullable=False)
+    answer4_hashed = Column(String, nullable=False)
 
 Base.metadata.create_all(bind=engine)
-
-
 
 class UserBase(BaseModel):
     username: str
     email: str
 
-
 class UserCreate(UserBase):
     password: str
-
+    answer1: str
+    answer2: str
+    answer3: str
+    answer4: str
 
 class UserOut(UserBase):
     id: int
     is_online: bool
 
     class Config:
-        orm_mode = True
-
+        from_attributes = True
 
 class Token(BaseModel):
     access_token: str
     token_type: str
 
-
-
 def get_password_hash(password):
     return pwd_context.hash(password)
 
-
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
-
 
 def create_access_token(data: dict, expires_delta: timedelta = timedelta(minutes=15)):
     to_encode = data.copy()
     expire = datetime.utcnow() + expires_delta
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-
 
 def get_db():
     db = SessionLocal()
@@ -91,19 +80,19 @@ def get_db():
     finally:
         db.close()
 
-
-
 @app.post("/register")
 def register(user: UserCreate, db: Session = Depends(get_db)):
     try:
-        print("Received user:", user)
-
         hashed_password = get_password_hash(user.password)
         new_user = User(
             username=user.username,
             email=user.email,
             hashed_password=hashed_password,
             is_online=False,
+            answer1_hashed=get_password_hash(user.answer1),
+            answer2_hashed=get_password_hash(user.answer2),
+            answer3_hashed=get_password_hash(user.answer3),
+            answer4_hashed=get_password_hash(user.answer4)
         )
 
         db.add(new_user)
@@ -123,10 +112,38 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
         print("Error during registration:", str(e))
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
+class ResetPasswordRequest(BaseModel):
+    username: str
+    answers: list[str]
+    new_password: str
 
+@app.post("/reset-password")
+def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == request.username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-# Login Endpoint
-from pydantic import BaseModel
+    hashed_answers = [user.answer1_hashed, user.answer2_hashed, user.answer3_hashed, user.answer4_hashed]
+
+    for provided, actual in zip(request.answers, hashed_answers):
+        if not verify_password(provided, actual):
+            raise HTTPException(status_code=403, detail="Incorrect security answer")
+
+    user.hashed_password = get_password_hash(request.new_password)
+    db.commit()
+    return {"message": "Password reset successfully"}
+
+@app.get("/security-question/{username}")
+def get_security_question(username: str):
+    # The questions are supposed to come from the frontend, so this just returns a placeholder
+    return {
+        "questions": [
+            "What is your favorite color?",
+            "What is your pet's name?",
+            "What is your birthplace?",
+            "What is your mother's maiden name?"
+        ]
+    }
 
 class LoginRequest(BaseModel):
     username: str
