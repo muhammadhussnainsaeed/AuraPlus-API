@@ -1,164 +1,304 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, Boolean
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
 from passlib.context import CryptContext
-from datetime import datetime, timedelta
+import psycopg2
 import jwt
-
-SQLALCHEMY_DATABASE_URL = "postgresql://postgres:12345@localhost/chat_app"
-Base = declarative_base()
-
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-
-SECRET_KEY = "hassan"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
+# Secret key for encoding and decoding JWTs (keep it safe)
+SECRET_KEY = "your_secret_key"  # Change this to a strong, secret key!
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30  # You can adjust the expiry time here
+
+# Password hashing context
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-class User(Base):
-    __tablename__ = "users"
+# Database connection (change these as per your setup)
+conn = psycopg2.connect(
+    dbname="AuraPlus",
+    user="postgres",
+    password="12345",
+    host="localhost",      # Or your DB host
+    port="5432"            # Default PostgreSQL port
+)
+cursor = conn.cursor()
 
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True)
-    email = Column(String, unique=True, index=True)
-    hashed_password = Column(String)
-    is_online = Column(Boolean, default=False)
 
-    answer1_hashed = Column(String, nullable=False)
-    answer2_hashed = Column(String, nullable=False)
-    answer3_hashed = Column(String, nullable=False)
-    answer4_hashed = Column(String, nullable=False)
-
-Base.metadata.create_all(bind=engine)
-
-class UserBase(BaseModel):
+# Request body schema
+class UserCreate(BaseModel):
     username: str
-    email: str
-
-class UserCreate(UserBase):
+    name: str
     password: str
-    answer1: str
-    answer2: str
-    answer3: str
-    answer4: str
+    question1_answer: str
+    question2_answer: str
+    question3_answer: str
+    question4_answer: str
+    question5_answer: str
 
-class UserOut(UserBase):
-    id: int
-    is_online: bool
+#register the user in to the database
+@app.post("/register")
+def register_user(user: UserCreate):
+    try:
+        # Hash the password
+        hashed_password = pwd_context.hash(user.password)
 
-    class Config:
-        from_attributes = True
+        # Insert into the database
+        cursor.execute("""
+            INSERT INTO users (
+                username, hashed_password,name,
+                question1_answer, question2_answer,
+                question3_answer, question4_answer, question5_answer
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            user.username,
+            hashed_password,
+            user.name,
+            user.question1_answer,
+            user.question2_answer,
+            user.question3_answer,
+            user.question4_answer,
+            user.question5_answer
+        ))
 
-class Token(BaseModel):
-    access_token: str
-    token_type: str
+        conn.commit()
+        return {"message": "User registered successfully."}
 
-def get_password_hash(password):
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail="Username already exists.")
+
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+#check for the umer name
+# OAuth2PasswordBearer instance (used for extracting token from Authorization header)
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+
+# Request body schema
+class UserCreate(BaseModel):
+    username: str
+    password: str
+
+
+# Function to hash passwords
+def hash_password(password: str):
     return pwd_context.hash(password)
 
+
+# Function to verify the password
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
-def create_access_token(data: dict, expires_delta: timedelta = timedelta(minutes=15)):
+
+# Function to create JWT Token
+def create_access_token(data: dict, expires_delta: timedelta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)):
     to_encode = data.copy()
     expire = datetime.utcnow() + expires_delta
     to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
 
-def get_db():
-    db = SessionLocal()
+
+# Function to verify JWT token
+def verify_token(token: str):
     try:
-        yield db
-    finally:
-        db.close()
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token or expired token.")
 
-@app.post("/register")
-def register(user: UserCreate, db: Session = Depends(get_db)):
-    try:
-        hashed_password = get_password_hash(user.password)
-        new_user = User(
-            username=user.username,
-            email=user.email,
-            hashed_password=hashed_password,
-            is_online=False,
-            answer1_hashed=get_password_hash(user.answer1),
-            answer2_hashed=get_password_hash(user.answer2),
-            answer3_hashed=get_password_hash(user.answer3),
-            answer4_hashed=get_password_hash(user.answer4)
-        )
 
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
-
-        return {
-            "message": "User registered successfully",
-            "user": {
-                "id": new_user.id,
-                "username": new_user.username,
-                "email": new_user.email,
-                "is_online": new_user.is_online
-            }
-        }
-    except Exception as e:
-        print("Error during registration:", str(e))
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-class ResetPasswordRequest(BaseModel):
-    username: str
-    answers: list[str]
-    new_password: str
-
-@app.post("/reset-password")
-def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == request.username).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    hashed_answers = [user.answer1_hashed, user.answer2_hashed, user.answer3_hashed, user.answer4_hashed]
-
-    for provided, actual in zip(request.answers, hashed_answers):
-        if not verify_password(provided, actual):
-            raise HTTPException(status_code=403, detail="Incorrect security answer")
-
-    user.hashed_password = get_password_hash(request.new_password)
-    db.commit()
-    return {"message": "Password reset successfully"}
-
-@app.get("/security-question/{username}")
-def get_security_question(username: str):
-    # The questions are supposed to come from the frontend, so this just returns a placeholder
-    return {
-        "questions": [
-            "What is your favorite color?",
-            "What is your pet's name?",
-            "What is your birthplace?",
-            "What is your mother's maiden name?"
-        ]
-    }
-
+# Login Request Schema
 class LoginRequest(BaseModel):
     username: str
     password: str
 
-@app.post("/token", response_model=Token)
-def login(login_data: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == login_data.username).first()
 
-    if not user or not verify_password(login_data.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+# Endpoint to check username and password and return JWT token
+@app.post("/login")
+def login(data: LoginRequest):
+    cursor.execute("SELECT * FROM users WHERE username = %s", (data.username,))
+    user = cursor.fetchone()
 
-    access_token = create_access_token(data={"sub": user.username})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    hashed_password = user[2]  # Assuming the 3rd column is the hashed password
+
+    if not verify_password(data.password, hashed_password):
+        raise HTTPException(status_code=401, detail="Incorrect password.")
+
+    # Generate JWT token
+    access_token = create_access_token(data={"sub": data.username})
+
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+# Endpoint to get user profile (Protected)
+@app.get("/profile")
+def get_profile(token: str = Depends(oauth2_scheme)):
+    # Verify the token and extract user info
+    user_data = verify_token(token)
+    username = user_data.get("sub")
+
+    cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
+    user = cursor.fetchone()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # Exclude sensitive fields like the password
+    user_data = {
+        "id": user[0],
+        "username": user[1],
+        "name": user[11],
+        "profile_image": user[5],
+        "question1_answer": user[6],
+        "question2_answer": user[7],
+        "question3_answer": user[8],
+        "question4_answer": user[9],
+        "question5_answer": user[10],
+        "is_online": user[3],
+        "created_at": user[4]
+    }
+
+    return {"user": user_data}
+
+
+#checks for the user is avaiable or not
+@app.get("/check-username")
+def check_username(username: str):
+    try:
+        cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
+        user = cursor.fetchone()
+        if user:
+            return {"available": False, "message": "Username is already taken."}
+        else:
+            return {"available": True, "message": "Username is available."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+#forget password
+class SecurityQuestionRequest(BaseModel):
+    username: str
+    question1_answer: str
+    question2_answer: str
+    question3_answer: str
+    question4_answer: str
+    question5_answer: str
+
+# Endpoint to check answers to security questions
+@app.post("/check_security_answers")
+def check_security_answers(data: SecurityQuestionRequest):
+    cursor.execute("SELECT * FROM users WHERE username = %s", (data.username,))
+    user = cursor.fetchone()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # Compare the answers to the stored answers
+    is_correct = (
+        user[6] == data.question1_answer and  # question1_answer stored at index 4
+        user[7] == data.question2_answer and  # question2_answer stored at index 5
+        user[8] == data.question3_answer and  # question3_answer stored at index 6
+        user[9] == data.question4_answer and  # question4_answer stored at index 7
+        user[10] == data.question5_answer      # question5_answer stored at index 8
+    )
+
+    if is_correct:
+        return {"success": True, "message": "All answers are correct."}
+    else:
+        return {"success": False, "message": "One or more answers are incorrect."}
+
+
+####update the password
+# Request body schema for password update
+class PasswordUpdateRequest(BaseModel):
+    username: str
+    new_password: str
+
+# Function to hash passwords
+def hash_password(password: str):
+    return pwd_context.hash(password)
+
+# Endpoint to update password
+@app.post("/forgetupdate_password")
+def update_password(data: PasswordUpdateRequest):
+    # Fetch the user by username
+    cursor.execute("SELECT * FROM users WHERE username = %s", (data.username,))
+    user = cursor.fetchone()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # Hash the new password
+    new_hashed_password = hash_password(data.new_password)
+
+    # Update the password in the database
+    cursor.execute(
+        "UPDATE users SET hashed_password = %s WHERE username = %s",
+        (new_hashed_password, data.username)
+    )
+    conn.commit()
+
+    return {"success": True, "message": "Password updated successfully."}
+
+
+####Update the old password by taking the old password
+
+# Request body schema for password update
+class PasswordUpdateRequest(BaseModel):
+    username: str
+    old_password: str
+    new_password: str
+
+
+# Function to hash passwords
+def hash_password(password: str):
+    return pwd_context.hash(password)
+
+
+# Function to verify the password
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+# Endpoint to update password
+@app.post("/update_password")
+def update_password(data: PasswordUpdateRequest):
+    # Fetch the user by username
+    cursor.execute("SELECT * FROM users WHERE username = %s", (data.username,))
+    user = cursor.fetchone()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # Get the stored hashed password (assuming it's stored in column 2)
+    stored_hashed_password = user[2]
+
+    # Verify the old password
+    if not verify_password(data.old_password, stored_hashed_password):
+        raise HTTPException(status_code=401, detail="Old password is incorrect.")
+
+    # Hash the new password
+    new_hashed_password = hash_password(data.new_password)
+
+    # Update the password in the database
+    cursor.execute(
+        "UPDATE users SET hashed_password = %s WHERE username = %s",
+        (new_hashed_password, data.username)
+    )
+    conn.commit()
+
+    return {"success": True, "message": "Password updated successfully."}
+
+
+####
