@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from passlib.context import CryptContext
 import psycopg2
 import jwt
+import base64
 from datetime import datetime, timedelta
 
 app = FastAPI()
@@ -158,7 +159,7 @@ def get_profile(token: str = Depends(oauth2_scheme)):
         "id": user[0],
         "username": user[1],
         "name": user[11],
-        "profile_image": user[5],
+        "profile_image": base64.b64encode(user[5]).decode('utf-8') if user[5] else None,
         "question1_answer": user[6],
         "question2_answer": user[7],
         "question3_answer": user[8],
@@ -171,7 +172,7 @@ def get_profile(token: str = Depends(oauth2_scheme)):
     return {"user": user_data}
 
 
-#checks for the user is avaiable or not
+#checks for the user is available or not
 @app.get("/check-username")
 def check_username(username: str):
     try:
@@ -301,4 +302,118 @@ def update_password(data: PasswordUpdateRequest):
     return {"success": True, "message": "Password updated successfully."}
 
 
-####
+####Update the name and the profile image
+# Request model
+class UserPhotoUpdate(BaseModel):
+    username: str
+    name: str
+    profile_image: str  # base64-encoded image
+
+
+@app.post("/update-user-photo")
+def update_user_photo(data: UserPhotoUpdate):
+    try:
+        # Decode the base64 image string to bytes
+        try:
+            image_bytes = base64.b64decode(data.profile_image)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid base64 image string.")
+
+        # Update name and image in database
+        cursor.execute("""
+            UPDATE users
+            SET name = %s,
+                profile_image = %s
+            WHERE username = %s
+        """, (
+            data.name,
+            psycopg2.Binary(image_bytes),
+            data.username
+        ))
+
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="User not found.")
+
+        conn.commit()
+        return {"message": "User name and picture updated successfully."}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+#Feteching the picture from the database
+
+class UserQuery(BaseModel):
+    username: str
+
+@app.post("/get-user-photo")
+def get_user_photo(data: UserQuery):
+    try:
+        cursor.execute("SELECT name, profile_image FROM users WHERE username = %s", (data.username,))
+        result = cursor.fetchone()
+
+        if result is None or result[1] is None:
+            raise HTTPException(status_code=404, detail="User or image not found.")
+
+        name = result[0]
+        image_bytes = result[1]
+        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+
+        return {
+            "username": data.username,
+            "name": name,
+            "profile_image": image_base64
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+#Update the Online Status of the user
+
+class OnlineStatusUpdate(BaseModel):
+    username: str
+    is_online: bool
+
+@app.post("/update-online-status")
+def update_online_status(data: OnlineStatusUpdate):
+    try:
+        cursor.execute("""
+            UPDATE users
+            SET is_online = %s
+            WHERE username = %s
+        """, (
+            data.is_online,
+            data.username
+        ))
+
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="User not found.")
+
+        conn.commit()
+        return {"message": f"User online status updated to {data.is_online}."}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+#get the online status of the user
+@app.post("/get-online-status")
+def get_online_status(data: UserQuery):
+    try:
+        cursor.execute("SELECT is_online FROM users WHERE username = %s", (data.username,))
+        result = cursor.fetchone()
+
+        if result is None:
+            raise HTTPException(status_code=404, detail="User not found.")
+
+        return {"username": data.username, "is_online": result[0]}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
