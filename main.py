@@ -1,4 +1,15 @@
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from pydantic import BaseModel
+from sqlalchemy import create_engine, Column, Integer, String, Boolean
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+import jwt
+
+# SQLALCHEMY_DATABASE_URL = "postgresql://postgres:12345@localhost/chat_app"
+from fastapi import FastAPI, HTTPException, Depends, status,Query
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from passlib.context import CryptContext
@@ -6,6 +17,7 @@ import psycopg2
 import jwt
 import base64
 from datetime import datetime, timedelta
+from typing import Optional  # ✅ Correct
 
 app = FastAPI()
 
@@ -19,7 +31,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Database connection (change these as per your setup)
 conn = psycopg2.connect(
-    dbname="AuraPlus",
+    dbname="aura+",
     user="postgres",
     password="12345",
     host="localhost",      # Or your DB host
@@ -38,6 +50,16 @@ class UserCreate(BaseModel):
     question3_answer: str
     question4_answer: str
     question5_answer: str
+
+class MessageCreate(BaseModel):
+    chat_id: int
+    sender_id: int
+    content: Optional[str] = None
+    media_url: Optional[str] = None
+    message_type: str = "text"
+
+class ChatQuery(BaseModel):
+    chat_id: int
 
 #register the user in to the database
 @app.post("/register")
@@ -378,6 +400,64 @@ class OnlineStatusUpdate(BaseModel):
     username: str
     is_online: bool
 
+@app.post("/send-message")
+def send_message(message: MessageCreate):
+    try:
+        cursor.execute("""
+            INSERT INTO messages (chat_id, sender_id, content, media_url, message_type)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id, created_at
+        """, (
+            message.chat_id,
+            message.sender_id,
+            message.content,
+            message.media_url,
+            message.message_type
+        ))
+        result = cursor.fetchone()
+        conn.commit()
+
+        return {
+            "success": True,
+            "message_id": result[0],
+            "created_at": result[1],
+            "detail": "Message sent successfully."
+        }
+
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/get-messages")
+def get_messages(query: ChatQuery):
+    try:
+        cursor.execute("""
+            SELECT id, sender_id, content, media_url, message_type, created_at
+            FROM messages
+            WHERE chat_id = %s
+            ORDER BY created_at ASC
+        """, (query.chat_id,))
+        messages = cursor.fetchall()
+
+        result = []
+        for msg in messages:
+            result.append({
+                "message_id": msg[0],
+                "sender_id": msg[1],
+                "content": msg[2],
+                "media_url": msg[3],
+                "message_type": msg[4],
+                "created_at": msg[5]
+            })
+
+        return {
+            "success": True,
+            "chat_id": query.chat_id,
+            "messages": result
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/update-online-status")
 def update_online_status(data: OnlineStatusUpdate):
     try:
@@ -417,3 +497,57 @@ def get_online_status(data: UserQuery):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/user-messages")
+def get_user_messages(username: str = Query(...)):
+    try:
+        # Step 1: Get user ID from username
+        cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
+        user_row = cursor.fetchone()
+        if not user_row:
+            raise HTTPException(status_code=404, detail="User not found.")
+        user_id = user_row[0]
+
+        # Step 2: Get all chat IDs where the user is a participant
+        cursor.execute("""
+            SELECT id FROM chats
+            WHERE user1_id = %s OR user2_id = %s
+        """, (user_id, user_id))
+        chat_ids = [row[0] for row in cursor.fetchall()]
+
+        if not chat_ids:
+            return {"messages": []}
+
+        # Step 3: Get messages in those chats not sent by the current user
+        format_ids = tuple(chat_ids) if len(chat_ids) > 1 else f"({chat_ids[0]})"
+        cursor.execute(f"""
+            SELECT messages.id, messages.chat_id, messages.content, messages.media_url,
+                   messages.message_type, messages.created_at,
+                   users.username as sender_username
+            FROM messages
+            JOIN users ON messages.sender_id = users.id
+            WHERE messages.chat_id IN {format_ids}
+            AND messages.sender_id != %s
+            ORDER BY messages.created_at DESC
+        """, (user_id,))
+
+        messages = cursor.fetchall()
+
+        result = []
+        for msg in messages:
+            result.append({
+                "message_id": msg[0],
+                "chat_id": msg[1],
+                "content": msg[2],
+                "media_url": msg[3],
+                "message_type": msg[4],
+                "timestamp": msg[5],
+                "sender": msg[6]
+            })
+
+        return {"messages": result}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
