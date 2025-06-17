@@ -19,6 +19,8 @@ import base64
 from datetime import datetime, timedelta
 from typing import Optional  # ✅ Correct
 
+from starlette.middleware.cors import CORSMiddleware
+
 app = FastAPI()
 
 # Secret key for encoding and decoding JWTs (keep it safe)
@@ -31,7 +33,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Database connection (change these as per your setup)
 conn = psycopg2.connect(
-    dbname="aura+",
+    dbname="AuraPlus",
     user="postgres",
     password="12345",
     host="localhost",      # Or your DB host
@@ -551,3 +553,53 @@ def get_user_messages(username: str = Query(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+#Get all the users
+
+class ContactQuery(BaseModel):
+    username: str
+
+@app.post("/get-users")
+def get_contacts(data: ContactQuery):
+    try:
+        cursor.execute("""
+            SELECT username, name, profile_image
+            FROM users
+            WHERE username != %s
+        """, (data.username,))
+
+        results = cursor.fetchall()
+
+        users = []
+        for row in results:
+            username, name, profile_image = row
+            image_base64 = base64.b64encode(profile_image).decode("utf-8") if profile_image else None
+
+            users.append({
+                "username": username,
+                "name": name,
+                "profile_image": image_base64
+            })
+
+        return {"users": users}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# Define allowed origins (use "*" for all, or specify allowed URLs)
+# origins = [
+#     "http://localhost:8000",
+#     "http://192.168.100.196:8888",
+#     "*",  # Allow all origins (use with caution)
+# ]
+#
+# # Add CORS middleware
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=origins,  # Allowed origins
+#     allow_credentials=True,
+#     allow_methods=["*"],  # Allow all HTTP methods
+#     allow_headers=["*"],  # Allow all headers
+# )
