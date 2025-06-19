@@ -63,6 +63,28 @@ class MessageCreate(BaseModel):
 class ChatQuery(BaseModel):
     chat_id: int
 
+        
+class Usernames(BaseModel):
+    username1: str
+    username2: str
+
+class UsernameRequest(BaseModel):
+    username: str
+
+
+    #Create the group and add the members in it
+class GroupCreateRequest(BaseModel):
+    group_name: str
+    creator_username: str
+    members: list[str]  # list of usernames (excluding creator)
+
+class ContactQuery(BaseModel):
+    username: str
+
+
+
+
+
 #register the user in to the database
 @app.post("/register")
 def register_user(user: UserCreate):
@@ -110,7 +132,8 @@ class UserCreate(BaseModel):
     username: str
     password: str
 
-
+class UserQuery(BaseModel):
+    username: str
 # Function to hash passwords
 def hash_password(password: str):
     return pwd_context.hash(password)
@@ -144,6 +167,43 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
+
+#forget password
+class SecurityQuestionRequest(BaseModel):
+    username: str
+    question1_answer: str
+    question2_answer: str
+    question3_answer: str
+    question4_answer: str
+    question5_answer: str
+
+
+####update the password
+# Request body schema for password update
+class PasswordUpdateRequest(BaseModel):
+    username: str
+    new_password: str
+
+
+####Update the old password by taking the old password
+
+# Request body schema for password update
+class PasswordUpdateRequest(BaseModel):
+    username: str
+    old_password: str
+    new_password: str
+
+# Request model
+class UserPhotoUpdate(BaseModel):
+    username: str
+    name: str
+    profile_image: str  # base64-encoded image
+
+#Update the Online Status of the user
+
+class OnlineStatusUpdate(BaseModel):
+    username: str
+    is_online: bool
 
 # Endpoint to check username and password and return JWT token
 @app.post("/login")
@@ -211,14 +271,6 @@ def check_username(username: str):
 
 
 
-#forget password
-class SecurityQuestionRequest(BaseModel):
-    username: str
-    question1_answer: str
-    question2_answer: str
-    question3_answer: str
-    question4_answer: str
-    question5_answer: str
 
 # Endpoint to check answers to security questions
 @app.post("/check_security_answers")
@@ -244,11 +296,6 @@ def check_security_answers(data: SecurityQuestionRequest):
         return {"success": False, "message": "One or more answers are incorrect."}
 
 
-####update the password
-# Request body schema for password update
-class PasswordUpdateRequest(BaseModel):
-    username: str
-    new_password: str
 
 # Function to hash passwords
 def hash_password(password: str):
@@ -277,18 +324,11 @@ def update_password(data: PasswordUpdateRequest):
     return {"success": True, "message": "Password updated successfully."}
 
 
-####Update the old password by taking the old password
-
-# Request body schema for password update
-class PasswordUpdateRequest(BaseModel):
-    username: str
-    old_password: str
-    new_password: str
 
 
-# Function to hash passwords
-def hash_password(password: str):
-    return pwd_context.hash(password)
+# # Function to hash passwords
+# def hash_password(password: str):
+#     return pwd_context.hash(password)
 
 
 # Function to verify the password
@@ -327,11 +367,7 @@ def update_password(data: PasswordUpdateRequest):
 
 
 ####Update the name and the profile image
-# Request model
-class UserPhotoUpdate(BaseModel):
-    username: str
-    name: str
-    profile_image: str  # base64-encoded image
+
 
 
 @app.post("/update-user-photo")
@@ -370,8 +406,7 @@ def update_user_photo(data: UserPhotoUpdate):
 
 #Feteching the picture from the database
 
-class UserQuery(BaseModel):
-    username: str
+
 
 @app.post("/get-user-photo")
 def get_user_photo(data: UserQuery):
@@ -396,11 +431,7 @@ def get_user_photo(data: UserQuery):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-#Update the Online Status of the user
 
-class OnlineStatusUpdate(BaseModel):
-    username: str
-    is_online: bool
 
 @app.post("/send-message")
 def send_message(message: MessageCreate):
@@ -556,8 +587,7 @@ def get_user_messages(username: str = Query(...)):
 
 #Get all the users
 
-class ContactQuery(BaseModel):
-    username: str
+
 
 @app.post("/get-users")
 def get_contacts(data: ContactQuery):
@@ -586,6 +616,179 @@ def get_contacts(data: ContactQuery):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+
+@app.post("/create_or_get_chat")
+def create_or_get_chat(data: Usernames):
+    # ✅ Get user1 ID
+    cursor.execute("SELECT id FROM users WHERE username = %s", (data.username1,))
+    user1 = cursor.fetchone()
+    if not user1:
+        raise HTTPException(status_code=404, detail="Username 1 not found.")
+    user1_id = user1[0]
+
+    # ✅ Get user2 ID
+    cursor.execute("SELECT id FROM users WHERE username = %s", (data.username2,))
+    user2 = cursor.fetchone()
+    if not user2:
+        raise HTTPException(status_code=404, detail="Username 2 not found.")
+    user2_id = user2[0]
+
+    # ❌ Prevent same user chat
+    if user1_id == user2_id:
+        raise HTTPException(status_code=400, detail="Cannot create chat with the same user.")
+
+    # 🔎 Check if chat already exists (in either direction)
+    cursor.execute("""
+        SELECT id FROM chats
+        WHERE (user1_id = %s AND user2_id = %s)
+           OR (user1_id = %s AND user2_id = %s)
+    """, (user1_id, user2_id, user2_id, user1_id))
+    chat = cursor.fetchone()
+
+    if chat:
+        return {"chat_id": chat[0], "status": "exists"}
+
+    # 🆕 Create new chat
+    created_at = datetime.utcnow()
+    cursor.execute("""
+        INSERT INTO chats (user1_id, user2_id, created_at)
+        VALUES (%s, %s, %s)
+        RETURNING id
+    """, (user1_id, user2_id, created_at))
+    new_chat_id = cursor.fetchone()[0]
+    conn.commit()
+
+    return {"chat_id": new_chat_id, "status": "created"}
+
+#return the all chats of the user
+
+
+
+
+@app.post("/get_user_chats")
+def get_user_chats(data: UsernameRequest):
+    # Step 1: Get user ID from username
+    cursor.execute("SELECT id FROM users WHERE username = %s", (data.username,))
+    user = cursor.fetchone()
+    if not user:
+        raise HTTPException(status_code=404, detail="Username not found.")
+    user_id = user[0]
+
+    # Step 2: Fetch all chats for the user
+    cursor.execute("""
+        SELECT id, user1_id, user2_id FROM chats
+        WHERE user1_id = %s OR user2_id = %s
+    """, (user_id, user_id))
+    chats = cursor.fetchall()
+
+    result = []
+
+    for chat_id, user1_id, user2_id in chats:
+        other_user_id = user2_id if user1_id == user_id else user1_id
+
+        # Step 3: Get other user's details
+        cursor.execute("""
+            SELECT username, name, profile_image FROM users WHERE id = %s
+        """, (other_user_id,))
+        other_user = cursor.fetchone()
+        if not other_user:
+            continue
+
+        other_username, name, profile_picture = other_user
+
+        # Convert BYTEA to base64 string
+        if profile_picture:
+            picture_base64 = base64.b64encode(profile_picture).decode('utf-8')
+            picture_data_url = f"data:image/png;base64,{picture_base64}"
+        else:
+            picture_data_url = None
+
+        # Step 4: Get the last message (content + media check)
+        cursor.execute("""
+            SELECT content, media_url, created_at FROM messages
+            WHERE chat_id = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, (chat_id,))
+        last_msg = cursor.fetchone()
+        if last_msg:
+            content, media_url, last_time = last_msg
+            if content:
+                last_message = content
+            elif media_url:
+                last_message = "Media"
+            else:
+                last_message = None
+        else:
+            last_message, last_time = None, None
+
+        # Step 5: Add to result list
+        result.append({
+            "chat_id": chat_id,
+            "with_username": other_username,
+            "name": name,
+            "profile_picture_base64": picture_data_url,
+            "last_message": last_message,
+            "last_message_time": last_time
+        })
+
+    return result
+
+
+
+@app.post("/create_group")
+def create_group(data: GroupCreateRequest):
+    # Total members (creator + selected) must be 3–6
+    total_members = 1 + len(data.members)
+    if not (3 <= total_members <= 6):
+        raise HTTPException(status_code=400, detail="Group must have between 3 and 6 total members.")
+
+    # Get creator ID
+    cursor.execute("SELECT id FROM users WHERE username = %s", (data.creator_username,))
+    creator = cursor.fetchone()
+    if not creator:
+        raise HTTPException(status_code=404, detail="Creator username not found.")
+    creator_id = creator[0]
+
+    # Validate and get all member IDs
+    member_ids = []
+    for username in data.members:
+        cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
+        user = cursor.fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail=f"Username not found: {username}")
+        member_ids.append(user[0])
+
+    # Insert group
+    cursor.execute("""
+        INSERT INTO groups (group_name, created_by, created_at)
+        VALUES (%s, %s, %s)
+        RETURNING id
+    """, (data.group_name, creator_id, datetime.utcnow()))
+    group_id = cursor.fetchone()[0]
+
+    # Add creator as first member
+    cursor.execute("""
+        INSERT INTO group_members (group_id, user_id, joined_at)
+        VALUES (%s, %s, %s)
+    """, (group_id, creator_id, datetime.utcnow()))
+
+    # Add other members
+    for uid in member_ids:
+        cursor.execute("""
+            INSERT INTO group_members (group_id, user_id, joined_at)
+            VALUES (%s, %s, %s)
+        """, (group_id, uid, datetime.utcnow()))
+
+    conn.commit()
+
+    return {
+        "group_id": group_id,
+        "group_name": data.group_name,
+        "total_members": total_members,
+        "status": "created"
+    }
 
 
 # Define allowed origins (use "*" for all, or specify allowed URLs)
