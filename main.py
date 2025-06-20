@@ -82,6 +82,10 @@ class ContactQuery(BaseModel):
     username: str
 
 
+class TypingUpdate(BaseModel):
+    chat_id: int
+    user_id: int
+    is_typing: bool
 
 
 
@@ -789,6 +793,38 @@ def create_group(data: GroupCreateRequest):
         "total_members": total_members,
         "status": "created"
     }
+
+
+
+@app.post("/update-typing-status")
+def update_typing_status(data: TypingUpdate):
+    try:
+        # Check if entry already exists
+        cursor.execute("""
+            SELECT id FROM typing_status WHERE chat_id = %s AND user_id = %s
+        """, (data.chat_id, data.user_id))
+        result = cursor.fetchone()
+
+        if result:
+            # Update existing
+            cursor.execute("""
+                UPDATE typing_status
+                SET is_typing = %s
+                WHERE chat_id = %s AND user_id = %s
+            """, (data.is_typing, data.chat_id, data.user_id))
+        else:
+            # Insert new
+            cursor.execute("""
+                INSERT INTO typing_status (chat_id, user_id, is_typing)
+                VALUES (%s, %s, %s)
+            """, (data.chat_id, data.user_id, data.is_typing))
+
+        conn.commit()
+        return {"message": "Typing status updated successfully."}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # Define allowed origins (use "*" for all, or specify allowed URLs)
