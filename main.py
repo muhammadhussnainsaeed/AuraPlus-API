@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 import jwt
 
 # SQLALCHEMY_DATABASE_URL = "postgresql://postgres:12345@localhost/chat_app"
-from fastapi import FastAPI, HTTPException, Depends, status,Query
+from fastapi import FastAPI, HTTPException, Depends, status,Query, WebSocket, WebSocketDisconnect
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from passlib.context import CryptContext
@@ -87,7 +87,8 @@ class TypingUpdate(BaseModel):
     user_id: int
     is_typing: bool
 
-# Pydantic schema for messages
+
+ # === Pydantic Schemas ===
 class MessageCreate(BaseModel):
     chat_id: int
     sender_id: int
@@ -95,13 +96,63 @@ class MessageCreate(BaseModel):
     media_url: str = ""
     message_type: str = "text"
 
-class MessageOut(BaseModel):
+class MessageOut(MessageCreate):
     id: int
-    chat_id: int
-    sender_id: int
-    content: str
-    media_url: str
-    message_type: str
+
+# === WebSocket Manager ===
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            await connection.send_text(message)
+
+manager = ConnectionManager()
+
+# === WebSocket Endpoint ===
+@app.websocket("/ws/chat")
+async def websocket_chat(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            data_dict = json.loads(data)
+
+            # Save message to DB
+            try:
+                cursor.execute("""
+                    INSERT INTO messages (chat_id, sender_id, content, media_url, message_type)
+                    VALUES (%s, %s, %s, %s, %s) RETURNING id
+                """, (
+                    data_dict["chat_id"],
+                    data_dict["sender_id"],
+                    data_dict["content"],
+                    data_dict.get("media_url", ""),
+                    data_dict.get("message_type", "text")
+                ))
+                new_id = cursor.fetchone()[0]
+                conn.commit()
+                data_dict["id"] = new_id
+
+                # Broadcast message (as JSON)
+                await manager.broadcast(json.dumps(data_dict))
+
+            except Exception as e:
+                conn.rollback()
+                await websocket.send_text(f"DB Error: {str(e)}")
+
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        await manager.broadcast("A user disconnected")
 
 
 
@@ -842,7 +893,7 @@ def update_typing_status(data: TypingUpdate):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Send a message (POST)
+# === REST API: POST Message ===
 @app.post("/messages", response_model=MessageOut)
 def send_message(msg: MessageCreate):
     try:
@@ -857,25 +908,31 @@ def send_message(msg: MessageCreate):
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-# Get messages for a chat (GET)
+# === REST API: GET Messages by Chat ===
 @app.get("/messages/{chat_id}", response_model=List[MessageOut])
 def get_messages(chat_id: int):
     try:
         cursor.execute("""
             SELECT id, chat_id, sender_id, content, media_url, message_type
-            FROM messages WHERE chat_id = %s ORDER BY id ASC
+            FROM messages
+            WHERE chat_id = %s
+            ORDER BY id ASC
         """, (chat_id,))
         rows = cursor.fetchall()
-        return [MessageOut(
-            id=row[0],
-            chat_id=row[1],
-            sender_id=row[2],
-            content=row[3],
-            media_url=row[4],
-            message_type=row[5]
-        ) for row in rows]
+        return [
+            MessageOut(
+                id=row[0],
+                chat_id=row[1],
+                sender_id=row[2],
+                content=row[3],
+                media_url=row[4],
+                message_type=row[5]
+            )
+            for row in rows
+        ]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 
