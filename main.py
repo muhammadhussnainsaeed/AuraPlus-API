@@ -1,3 +1,5 @@
+import json
+
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
@@ -100,9 +102,19 @@ class MessageOut(MessageCreate):
     id: int
 
 # === WebSocket Manager ===
+
+# === Pydantic model for incoming messages ===
+class WebSocketMessage(BaseModel):
+    chat_id: int
+    sender_id: int
+    content: str
+    media_url: Optional[str] = ""
+    message_type: str = "text"
+
+# === Updated ConnectionManager with safe broadcast ===
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: List[WebSocket] = []
+        self.active_connections: list[WebSocket] = []
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -113,38 +125,56 @@ class ConnectionManager:
             self.active_connections.remove(websocket)
 
     async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            await connection.send_text(message)
+        for connection in self.active_connections.copy():  # Use copy to avoid list mutation issues
+            try:
+                await connection.send_text(message)
+            except Exception as e:
+                print(f"Error sending message: {e}")
+                self.disconnect(connection)
 
 manager = ConnectionManager()
 
-# === WebSocket Endpoint ===
+# === Improved WebSocket Chat Endpoint ===
 @app.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            data = await websocket.receive_text()
-            data_dict = json.loads(data)
+            try:
+                raw_data = await websocket.receive_text()
+                data_dict = json.loads(raw_data)
+                message = WebSocketMessage(**data_dict)  # Validate incoming data
+            except Exception as e:
+                await websocket.send_text(f"Invalid message format: {str(e)}")
+                continue
 
-            # Save message to DB
+            # Save to DB with timestamp
             try:
                 cursor.execute("""
-                    INSERT INTO messages (chat_id, sender_id, content, media_url, message_type)
-                    VALUES (%s, %s, %s, %s, %s) RETURNING id
+                    INSERT INTO messages (chat_id, sender_id, content, media_url, message_type, created_at)
+                    VALUES (%s, %s, %s, %s, %s, NOW()) RETURNING id, created_at
                 """, (
-                    data_dict["chat_id"],
-                    data_dict["sender_id"],
-                    data_dict["content"],
-                    data_dict.get("media_url", ""),
-                    data_dict.get("message_type", "text")
+                    message.chat_id,
+                    message.sender_id,
+                    message.content,
+                    message.media_url,
+                    message.message_type
                 ))
-                new_id = cursor.fetchone()[0]
+                new_id, created_at = cursor.fetchone()
                 conn.commit()
-                data_dict["id"] = new_id
 
-                # Broadcast message (as JSON)
-                await manager.broadcast(json.dumps(data_dict))
+                full_message = {
+                    "id": new_id,
+                    "chat_id": message.chat_id,
+                    "sender_id": message.sender_id,
+                    "content": message.content,
+                    "media_url": message.media_url,
+                    "message_type": message.message_type,
+                    "created_at": created_at.isoformat()
+                }
+
+                print(f"💬 Message received: {full_message}")
+                await manager.broadcast(json.dumps(full_message))
 
             except Exception as e:
                 conn.rollback()
@@ -152,7 +182,7 @@ async def websocket_chat(websocket: WebSocket):
 
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-        await manager.broadcast("A user disconnected")
+        await manager.broadcast(json.dumps({"info": "A user disconnected"}))
 
 
 
@@ -501,67 +531,6 @@ def get_user_photo(data: UserQuery):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
-
-
-@app.post("/send-message")
-def send_message(message: MessageCreate):
-    try:
-        cursor.execute("""
-            INSERT INTO messages (chat_id, sender_id, content, media_url, message_type)
-            VALUES (%s, %s, %s, %s, %s)
-            RETURNING id, created_at
-        """, (
-            message.chat_id,
-            message.sender_id,
-            message.content,
-            message.media_url,
-            message.message_type
-        ))
-        result = cursor.fetchone()
-        conn.commit()
-
-        return {
-            "success": True,
-            "message_id": result[0],
-            "created_at": result[1],
-            "detail": "Message sent successfully."
-        }
-
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/get-messages")
-def get_messages(query: ChatQuery):
-    try:
-        cursor.execute("""
-            SELECT id, sender_id, content, media_url, message_type, created_at
-            FROM messages
-            WHERE chat_id = %s
-            ORDER BY created_at ASC
-        """, (query.chat_id,))
-        messages = cursor.fetchall()
-
-        result = []
-        for msg in messages:
-            result.append({
-                "message_id": msg[0],
-                "sender_id": msg[1],
-                "content": msg[2],
-                "media_url": msg[3],
-                "message_type": msg[4],
-                "created_at": msg[5]
-            })
-
-        return {
-            "success": True,
-            "chat_id": query.chat_id,
-            "messages": result
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.post("/update-online-status")
 def update_online_status(data: OnlineStatusUpdate):
     try:
@@ -799,6 +768,7 @@ def get_user_chats(data: UsernameRequest):
             "chat_id": chat_id,
             "with_username": other_username,
             "name": name,
+            "with_user_id": other_user_id,
             "profile_picture_base64": picture_data_url,
             "last_message": last_message,
             "last_message_time": last_time
@@ -894,6 +864,14 @@ def update_typing_status(data: TypingUpdate):
 
 
 # === REST API: POST Message ===
+
+class MessageOut(BaseModel):
+    chat_id: int
+    sender_id: int
+    content: str
+    media_url: Optional[str]
+    message_type: str
+
 @app.post("/messages", response_model=MessageOut)
 def send_message(msg: MessageCreate):
     try:
@@ -907,6 +885,7 @@ def send_message(msg: MessageCreate):
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # === REST API: GET Messages by Chat ===
 @app.get("/messages/{chat_id}", response_model=List[MessageOut])
