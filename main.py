@@ -1,6 +1,6 @@
 import json
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, String, Boolean
@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker, Session
 from passlib.context import CryptContext
 from datetime import datetime, timedelta
 import jwt
-
+import os
 # SQLALCHEMY_DATABASE_URL = "postgresql://postgres:12345@localhost/chat_app"
 from fastapi import FastAPI, HTTPException, Depends, status,Query, WebSocket, WebSocketDisconnect
 from fastapi.security import OAuth2PasswordBearer
@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from typing import Optional,List  # ✅ Correct
 
 from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import PlainTextResponse
 
 app = FastAPI()
 
@@ -163,10 +164,16 @@ async def websocket_chat(websocket: WebSocket):
                 new_id, created_at = cursor.fetchone()
                 conn.commit()
 
+                # ✅ Fetch the sender's username
+                cursor.execute("SELECT username FROM users WHERE id = %s", (message.sender_id,))
+                sender = cursor.fetchone()
+                sender_username = sender[0] if sender else "unknown"
+
                 full_message = {
                     "id": new_id,
                     "chat_id": message.chat_id,
                     "sender_id": message.sender_id,
+                    "username": sender_username,  # 👈 Include username
                     "content": message.content,
                     "media_url": message.media_url,
                     "message_type": message.message_type,
@@ -183,7 +190,6 @@ async def websocket_chat(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
         await manager.broadcast(json.dumps({"info": "A user disconnected"}))
-
 
 
 #register the user in to the database
@@ -706,75 +712,84 @@ def create_or_get_chat(data: Usernames):
 
 
 
+from fastapi import Request
+
 @app.post("/get_user_chats")
-def get_user_chats(data: UsernameRequest):
-    # Step 1: Get user ID from username
-    cursor.execute("SELECT id FROM users WHERE username = %s", (data.username,))
-    user = cursor.fetchone()
-    if not user:
-        raise HTTPException(status_code=404, detail="Username not found.")
-    user_id = user[0]
+def get_user_chats(data: UsernameRequest, request: Request):
+    try:
+        # Step 1: Get user ID from username
+        cursor.execute("SELECT id FROM users WHERE username = %s", (data.username,))
+        user = cursor.fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="Username not found.")
+        user_id = user[0]
 
-    # Step 2: Fetch all chats for the user
-    cursor.execute("""
-        SELECT id, user1_id, user2_id FROM chats
-        WHERE user1_id = %s OR user2_id = %s
-    """, (user_id, user_id))
-    chats = cursor.fetchall()
-
-    result = []
-
-    for chat_id, user1_id, user2_id in chats:
-        other_user_id = user2_id if user1_id == user_id else user1_id
-
-        # Step 3: Get other user's details
+        # Step 2: Fetch all chats for the user
         cursor.execute("""
-            SELECT username, name, profile_image FROM users WHERE id = %s
-        """, (other_user_id,))
-        other_user = cursor.fetchone()
-        if not other_user:
-            continue
+            SELECT id, user1_id, user2_id FROM chats
+            WHERE user1_id = %s OR user2_id = %s
+        """, (user_id, user_id))
+        chats = cursor.fetchall()
 
-        other_username, name, profile_picture = other_user
+        result = []
 
-        # Convert BYTEA to base64 string
-        if profile_picture:
-            picture_base64 = base64.b64encode(profile_picture).decode('utf-8')
-            picture_data_url = f"data:image/png;base64,{picture_base64}"
-        else:
-            picture_data_url = None
+        for chat_id, user1_id, user2_id in chats:
+            other_user_id = user2_id if user1_id == user_id else user1_id
 
-        # Step 4: Get the last message (content + media check)
-        cursor.execute("""
-            SELECT content, media_url, created_at FROM messages
-            WHERE chat_id = %s
-            ORDER BY created_at DESC
-            LIMIT 1
-        """, (chat_id,))
-        last_msg = cursor.fetchone()
-        if last_msg:
-            content, media_url, last_time = last_msg
-            if content:
-                last_message = content
-            elif media_url:
-                last_message = "Media"
+            # Step 3: Get other user's details
+            cursor.execute("""
+                SELECT username, name, profile_image FROM users WHERE id = %s
+            """, (other_user_id,))
+            other_user = cursor.fetchone()
+            if not other_user:
+                continue
+
+            other_username, name, profile_picture = other_user
+
+            # Convert BYTEA to base64 string
+            if profile_picture:
+                picture_base64 = base64.b64encode(profile_picture).decode('utf-8')
+                picture_data_url = f"data:image/png;base64,{picture_base64}"
             else:
-                last_message = None
-        else:
-            last_message, last_time = None, None
+                picture_data_url = None
 
-        # Step 5: Add to result list
-        result.append({
-            "chat_id": chat_id,
-            "with_username": other_username,
-            "name": name,
-            "with_user_id": other_user_id,
-            "profile_picture_base64": picture_data_url,
-            "last_message": last_message,
-            "last_message_time": last_time
-        })
+            # Step 4: Get the last message (content + media check)
+            cursor.execute("""
+                SELECT content, media_url, created_at FROM messages
+                WHERE chat_id = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (chat_id,))
+            last_msg = cursor.fetchone()
+            if last_msg:
+                content, media_url, last_time = last_msg
+                if content:
+                    last_message = content
+                elif media_url:
+                    last_message = "Media"
+                else:
+                    last_message = None
+            else:
+                last_message, last_time = None, None
 
-    return result
+            # Step 5: Add to result list
+            result.append({
+                "chat_id": chat_id,
+                "with_username": other_username,
+                "name": name,
+                "with_user_id": other_user_id,
+                "profile_picture_base64": picture_data_url,
+                "last_message": last_message,
+                "last_message_time": last_time
+            })
+
+        return result
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal Error: {str(e)}")
+
 
 
 
@@ -862,15 +877,36 @@ def update_typing_status(data: TypingUpdate):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+##get typing status
+@app.get("/typing-status/{chat_id}")
+def get_typing_status(chat_id: int):
+    try:
+        cursor.execute("""
+            SELECT 1
+            FROM typing_status
+            WHERE chat_id = %s AND is_typing = TRUE
+            LIMIT 1
+        """, (chat_id,))
+        result = cursor.fetchone()
+
+        return {"is_typing": bool(result)}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 # === REST API: POST Message ===
 
 class MessageOut(BaseModel):
+    id: int
     chat_id: int
     sender_id: int
     content: str
-    media_url: Optional[str]
+    media_url: str
     message_type: str
+    time_stamp: str
+    username: str
 
 @app.post("/messages", response_model=MessageOut)
 def send_message(msg: MessageCreate):
@@ -892,28 +928,63 @@ def send_message(msg: MessageCreate):
 def get_messages(chat_id: int):
     try:
         cursor.execute("""
-            SELECT id, chat_id, sender_id, content, media_url, message_type
-            FROM messages
-            WHERE chat_id = %s
-            ORDER BY id ASC
+            SELECT 
+                m.id, m.chat_id, m.sender_id, m.content, 
+                m.media_url, m.message_type, m.created_at,
+                u.username
+            FROM messages m
+            JOIN users u ON m.sender_id = u.id
+            WHERE m.chat_id = %s
+            ORDER BY m.id ASC
         """, (chat_id,))
         rows = cursor.fetchall()
-        return [
-            MessageOut(
+
+        messages = []
+        for row in rows:
+            created_at = row[6]
+            if isinstance(created_at, str):
+                created_at = datetime.fromisoformat(created_at)
+            iso_time = created_at.isoformat()
+
+            messages.append(MessageOut(
                 id=row[0],
                 chat_id=row[1],
                 sender_id=row[2],
                 content=row[3],
-                media_url=row[4],
-                message_type=row[5]
-            )
-            for row in rows
-        ]
+                media_url=row[4] if row[4] is not None else "",
+                message_type=row[5],
+                time_stamp=iso_time,
+                username=row[7]
+            ))
+
+        return messages
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+UPLOAD_DIR = "uploaded_files"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+@app.post("/upload-media/", response_class=PlainTextResponse)
+async def upload_media(
+    username: str = Form(...),
+    file: UploadFile = File(...)
+):
+    # Generate new filename: username_timestamp.extension
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ext = os.path.splitext(file.filename)[1]
+    new_filename = f"{username}_{timestamp}{ext}"
+
+    # File save path (on local machine)
+    file_path = os.path.join(UPLOAD_DIR, new_filename)
+
+    # Save file to disk
+    with open(file_path, "wb") as buffer:
+        buffer.write(await file.read())
+
+    # Return file path as URL (local)
+    return f"/{UPLOAD_DIR}/{new_filename}"
 
 # Define allowed origins (use "*" for all, or specify allowed URLs)
 # origins = [
