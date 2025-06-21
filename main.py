@@ -17,7 +17,7 @@ import psycopg2
 import jwt
 import base64
 from datetime import datetime, timedelta
-from typing import Optional  # ✅ Correct
+from typing import Optional,List  # ✅ Correct
 
 from starlette.middleware.cors import CORSMiddleware
 
@@ -86,6 +86,22 @@ class TypingUpdate(BaseModel):
     chat_id: int
     user_id: int
     is_typing: bool
+
+# Pydantic schema for messages
+class MessageCreate(BaseModel):
+    chat_id: int
+    sender_id: int
+    content: str
+    media_url: str = ""
+    message_type: str = "text"
+
+class MessageOut(BaseModel):
+    id: int
+    chat_id: int
+    sender_id: int
+    content: str
+    media_url: str
+    message_type: str
 
 
 
@@ -822,6 +838,42 @@ def update_typing_status(data: TypingUpdate):
         conn.commit()
         return {"message": "Typing status updated successfully."}
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Send a message (POST)
+@app.post("/messages", response_model=MessageOut)
+def send_message(msg: MessageCreate):
+    try:
+        cursor.execute("""
+            INSERT INTO messages (chat_id, sender_id, content, media_url, message_type)
+            VALUES (%s, %s, %s, %s, %s) RETURNING id
+        """, (msg.chat_id, msg.sender_id, msg.content, msg.media_url, msg.message_type))
+        new_id = cursor.fetchone()[0]
+        conn.commit()
+        return MessageOut(id=new_id, **msg.dict())
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Get messages for a chat (GET)
+@app.get("/messages/{chat_id}", response_model=List[MessageOut])
+def get_messages(chat_id: int):
+    try:
+        cursor.execute("""
+            SELECT id, chat_id, sender_id, content, media_url, message_type
+            FROM messages WHERE chat_id = %s ORDER BY id ASC
+        """, (chat_id,))
+        rows = cursor.fetchall()
+        return [MessageOut(
+            id=row[0],
+            chat_id=row[1],
+            sender_id=row[2],
+            content=row[3],
+            media_url=row[4],
+            message_type=row[5]
+        ) for row in rows]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
