@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from typing import Optional,List  # ✅ Correct
 
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import PlainTextResponse
+from starlette.responses import PlainTextResponse, FileResponse
 
 app = FastAPI()
 
@@ -177,7 +177,7 @@ async def websocket_chat(websocket: WebSocket):
                     "content": message.content,
                     "media_url": message.media_url,
                     "message_type": message.message_type,
-                    "created_at": created_at.isoformat()
+                    "time_stamp": created_at.isoformat()
                 }
 
                 print(f"💬 Message received: {full_message}")
@@ -878,15 +878,16 @@ def update_typing_status(data: TypingUpdate):
         raise HTTPException(status_code=500, detail=str(e))
 
 ##get typing status
-@app.get("/typing-status/{chat_id}")
-def get_typing_status(chat_id: int):
+@app.get("/typing-status/{chat_id}/{username}")
+def get_typing_status(chat_id: int, username: str):
     try:
         cursor.execute("""
             SELECT 1
-            FROM typing_status
-            WHERE chat_id = %s AND is_typing = TRUE
+            FROM typing_status t
+            JOIN users u ON t.user_id = u.id
+            WHERE t.chat_id = %s AND u.username = %s AND t.is_typing = TRUE
             LIMIT 1
-        """, (chat_id,))
+        """, (chat_id, username))
         result = cursor.fetchone()
 
         return {"is_typing": bool(result)}
@@ -896,42 +897,68 @@ def get_typing_status(chat_id: int):
 
 
 
+
 # === REST API: POST Message ===
 
-class MessageOut(BaseModel):
-    id: int
+class MessageCreate(BaseModel):
     chat_id: int
     sender_id: int
     content: str
     media_url: str
     message_type: str
-    time_stamp: str
-    username: str
 
+class MessageOut(BaseModel):
+    id: int
+    chat_id: int
+    sender_id: int
+    username: str
+    content: str
+    media_url: str
+    message_type: str
+    time_stamp: str
+
+
+# === POST: Send a new message ===
 @app.post("/messages", response_model=MessageOut)
 def send_message(msg: MessageCreate):
     try:
         cursor.execute("""
-            INSERT INTO messages (chat_id, sender_id, content, media_url, message_type)
-            VALUES (%s, %s, %s, %s, %s) RETURNING id
+            INSERT INTO messages (chat_id, sender_id, content, media_url, message_type, created_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            RETURNING id, created_at
         """, (msg.chat_id, msg.sender_id, msg.content, msg.media_url, msg.message_type))
-        new_id = cursor.fetchone()[0]
+        new_id, created_at = cursor.fetchone()
         conn.commit()
-        return MessageOut(id=new_id, **msg.dict())
+
+        # Fetch username
+        cursor.execute("SELECT username FROM users WHERE id = %s", (msg.sender_id,))
+        username_result = cursor.fetchone()
+        username = username_result[0] if username_result else "unknown"
+
+        return MessageOut(
+            id=new_id,
+            chat_id=msg.chat_id,
+            sender_id=msg.sender_id,
+            username=username,
+            content=msg.content,
+            media_url=msg.media_url or "",
+            message_type=msg.message_type,
+            time_stamp=created_at.isoformat()
+        )
+
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# === REST API: GET Messages by Chat ===
+# === GET: Get all messages for a chat ===
 @app.get("/messages/{chat_id}", response_model=List[MessageOut])
 def get_messages(chat_id: int):
     try:
         cursor.execute("""
             SELECT 
-                m.id, m.chat_id, m.sender_id, m.content, 
-                m.media_url, m.message_type, m.created_at,
-                u.username
+                m.id, m.chat_id, m.sender_id, u.username, m.content, 
+                m.media_url, m.message_type, m.created_at
             FROM messages m
             JOIN users u ON m.sender_id = u.id
             WHERE m.chat_id = %s
@@ -941,20 +968,22 @@ def get_messages(chat_id: int):
 
         messages = []
         for row in rows:
-            created_at = row[6]
-            if isinstance(created_at, str):
-                created_at = datetime.fromisoformat(created_at)
-            iso_time = created_at.isoformat()
+            id, chat_id, sender_id, username, content, media_url, message_type, created_at = row
+
+            if not isinstance(created_at, str):
+                created_at = created_at.isoformat()
+            else:
+                created_at = datetime.fromisoformat(created_at).isoformat()
 
             messages.append(MessageOut(
-                id=row[0],
-                chat_id=row[1],
-                sender_id=row[2],
-                content=row[3],
-                media_url=row[4] if row[4] is not None else "",
-                message_type=row[5],
-                time_stamp=iso_time,
-                username=row[7]
+                id=id,
+                chat_id=chat_id,
+                sender_id=sender_id,
+                username=username,
+                content=content,
+                media_url=media_url or "",
+                message_type=message_type,
+                time_stamp=created_at
             ))
 
         return messages
@@ -985,6 +1014,21 @@ async def upload_media(
 
     # Return file path as URL (local)
     return f"/{UPLOAD_DIR}/{new_filename}"
+
+#get the media
+UPLOAD_DIR = "uploaded_files"
+
+@app.get("/get-media/")
+def get_media(link: str = Query(..., description="/uploaded_files/file.png")):
+    # Sanitize: remove leading slashes and ensure it's inside UPLOAD_DIR
+    filename = os.path.basename(link)
+    file_path = os.path.join(UPLOAD_DIR, filename)
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return FileResponse(file_path, media_type="application/octet-stream", filename=filename)
+
 
 # Define allowed origins (use "*" for all, or specify allowed URLs)
 # origins = [
