@@ -1013,7 +1013,7 @@ async def upload_media(
         buffer.write(await file.read())
 
     # Return file path as URL (local)
-    return f"/{UPLOAD_DIR}/{new_filename}"
+    return f"{new_filename}"
 
 #get the media
 UPLOAD_DIR = "uploaded_files"
