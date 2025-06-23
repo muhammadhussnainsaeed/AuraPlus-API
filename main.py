@@ -1,16 +1,6 @@
 import json
+import shutil
 
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
-from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, Boolean
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-from passlib.context import CryptContext
-from datetime import datetime, timedelta
-import jwt
-import os
-# SQLALCHEMY_DATABASE_URL = "postgresql://postgres:12345@localhost/chat_app"
 from fastapi import FastAPI, HTTPException, Depends, status,Query, WebSocket, WebSocketDisconnect
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
@@ -18,6 +8,9 @@ from passlib.context import CryptContext
 import psycopg2
 import jwt
 import base64
+import os
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+import subprocess
 from datetime import datetime, timedelta
 from typing import Optional,List  # ✅ Correct
 
@@ -190,6 +183,70 @@ async def websocket_chat(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
         await manager.broadcast(json.dumps({"info": "A user disconnected"}))
+
+#websockets for web
+class GroupWebSocketMessage(BaseModel):
+    group_id: int
+    sender_id: int
+    content: Optional[str] = None
+    media_url: Optional[str] = None
+    message_type: str  # e.g., "text", "image", "audio"
+
+@app.websocket("/ws/group_chat")
+async def websocket_group_chat(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            try:
+                raw_data = await websocket.receive_text()
+                data_dict = json.loads(raw_data)
+                message = GroupWebSocketMessage(**data_dict)
+            except Exception as e:
+                await websocket.send_text(f"Invalid message format: {str(e)}")
+                continue
+
+            try:
+                # Save the message to the database
+                cursor.execute("""
+                    INSERT INTO group_messages (group_id, sender_id, content, media_url, message_type, created_at)
+                    VALUES (%s, %s, %s, %s, %s, NOW())
+                    RETURNING id, created_at
+                """, (
+                    message.group_id,
+                    message.sender_id,
+                    message.content,
+                    message.media_url,
+                    message.message_type
+                ))
+                new_id, created_at = cursor.fetchone()
+                conn.commit()
+
+                # Get sender username
+                cursor.execute("SELECT username FROM users WHERE id = %s", (message.sender_id,))
+                sender = cursor.fetchone()
+                sender_username = sender[0] if sender else "unknown"
+
+                full_message = {
+                    "id": new_id,
+                    "group_id": message.group_id,
+                    "sender_id": message.sender_id,
+                    "username": sender_username,
+                    "content": message.content,
+                    "media_url": message.media_url,
+                    "message_type": message.message_type,
+                    "time_stamp": created_at.isoformat()
+                }
+
+                print(f"📢 Group message received: {full_message}")
+                await manager.broadcast(json.dumps(full_message))
+
+            except Exception as e:
+                conn.rollback()
+                await websocket.send_text(f"DB Error: {str(e)}")
+
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        await manager.broadcast(json.dumps({"info": "A group user disconnected"}))
 
 
 #register the user in to the database
@@ -708,10 +765,6 @@ def create_or_get_chat(data: Usernames):
     return {"chat_id": new_chat_id, "status": "created"}
 
 #return the all chats of the user
-
-
-
-
 from fastapi import Request
 
 @app.post("/get_user_chats")
@@ -790,8 +843,60 @@ def get_user_chats(data: UsernameRequest, request: Request):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Internal Error: {str(e)}")
 
+#get the user group
 
+@app.post("/get_user_groups")
+def get_user_groups(data: UsernameRequest):
+    try:
+        # Step 1: Get user ID
+        cursor.execute("SELECT id FROM users WHERE username = %s", (data.username,))
+        user = cursor.fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="Username not found.")
+        user_id = user[0]
 
+        # Step 2: Get all group IDs where the user is a member or admin
+        cursor.execute("""
+            SELECT DISTINCT g.id, g.group_name, g.created_at
+            FROM groups g
+            LEFT JOIN group_members gm ON g.id = gm.group_id
+            WHERE g.created_by = %s OR gm.user_id = %s
+        """, (user_id, user_id))
+        groups = cursor.fetchall()
+
+        result = []
+
+        for group_id, group_name, created_at in groups:
+            # Step 3: Get the last message from this group
+            cursor.execute("""
+                SELECT content, media_url, created_at
+                FROM group_messages
+                WHERE group_id = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (group_id,))
+            msg = cursor.fetchone()
+
+            if msg:
+                content, media_url, last_time = msg
+                last_message = content if content else ("Media" if media_url else None)
+            else:
+                last_message, last_time = None, None
+
+            result.append({
+                "group_id": group_id,
+                "group_name": group_name,
+                "last_message": last_message,
+                "last_time": last_time.isoformat() if last_time else None
+            })
+
+        return result
+
+    except Exception as e:
+        print("❌ Error in get_user_groups:", e)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+#create the group
 
 @app.post("/create_group")
 def create_group(data: GroupCreateRequest):
@@ -991,6 +1096,49 @@ def get_messages(chat_id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# === GET: Get all messages for a group ===
+
+@app.get("/group_messages/{group_id}", response_model=List[MessageOut])
+def get_group_messages(group_id: int):
+    try:
+        cursor.execute("""
+            SELECT 
+                gm.id, gm.group_id, gm.sender_id, u.username, gm.content,
+                gm.media_url, gm.message_type, gm.created_at
+            FROM group_messages gm
+            JOIN users u ON gm.sender_id = u.id
+            WHERE gm.group_id = %s
+            ORDER BY gm.id ASC
+        """, (group_id,))
+        rows = cursor.fetchall()
+
+        messages = []
+        for row in rows:
+            id, chat_id, sender_id, username, content, media_url, message_type, created_at = row
+
+            if not isinstance(created_at, str):
+                created_at = created_at.isoformat()
+            else:
+                created_at = datetime.fromisoformat(created_at).isoformat()
+
+            messages.append(MessageOut(
+                id=id,
+                chat_id=chat_id,
+                sender_id=sender_id,
+                username=username,
+                content=content,
+                media_url=media_url or "",
+                message_type=message_type,
+                time_stamp=created_at
+            ))
+
+        return messages
+
+    except Exception as e:
+        conn.rollback()  # ✅ Ensure the transaction state is reset
+        print("❌ SQL Error:", e)
+        raise HTTPException(status_code=500, detail=f"Error fetching group messages: {str(e)}")
+
 
 UPLOAD_DIR = "uploaded_files"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -1000,20 +1148,35 @@ async def upload_media(
     username: str = Form(...),
     file: UploadFile = File(...)
 ):
-    # Generate new filename: username_timestamp.extension
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    ext = os.path.splitext(file.filename)[1]
-    new_filename = f"{username}_{timestamp}{ext}"
+    try:
+        # Generate filename base
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        original_ext = os.path.splitext(file.filename)[1].lower()
+        base_filename = f"{username}_{timestamp}"
 
-    # File save path (on local machine)
-    file_path = os.path.join(UPLOAD_DIR, new_filename)
+        # Target filenames
+        original_filename = f"{base_filename}{original_ext}"
+        webm_filename = f"{base_filename}.webm"
 
-    # Save file to disk
-    with open(file_path, "wb") as buffer:
-        buffer.write(await file.read())
+        # Target paths
+        original_path = os.path.join(UPLOAD_DIR, original_filename)
+        webm_path = os.path.join(UPLOAD_DIR, webm_filename)
 
-    # Return file path as URL (local)
-    return f"{new_filename}"
+        # Save the uploaded file as original
+        with open(original_path, "wb") as buffer:
+            buffer.write(await file.read())
+
+        # Copy original to webm (renamed only)
+        shutil.copyfile(original_path, webm_path)
+
+        print(f"✅ Saved original: {original_filename}")
+        print(f"✅ Renamed copy as: {webm_filename}")
+
+        # Return original filename (.m4a, for example)
+        return original_filename
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 #get the media
 UPLOAD_DIR = "uploaded_files"
