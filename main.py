@@ -357,6 +357,10 @@ class PasswordUpdateRequest(BaseModel):
     old_password: str
     new_password: str
 
+class ForgetUpdateRequest(BaseModel):
+    username: str
+    new_password: str
+
 # Request model
 class UserPhotoUpdate(BaseModel):
     username: str
@@ -467,7 +471,7 @@ def hash_password(password: str):
 
 # Endpoint to update password
 @app.post("/forgetupdate_password")
-def update_password(data: PasswordUpdateRequest):
+def update_password(data: ForgetUpdateRequest):
     # Fetch the user by username
     cursor.execute("SELECT * FROM users WHERE username = %s", (data.username,))
     user = cursor.fetchone()
@@ -1154,30 +1158,40 @@ async def upload_media(
         original_ext = os.path.splitext(file.filename)[1].lower()
         base_filename = f"{username}_{timestamp}"
 
-        # Target filenames
+        # Filenames
         original_filename = f"{base_filename}{original_ext}"
         webm_filename = f"{base_filename}.webm"
+        m4a_filename = f"{base_filename}.m4a"
 
-        # Target paths
+        # Paths
         original_path = os.path.join(UPLOAD_DIR, original_filename)
         webm_path = os.path.join(UPLOAD_DIR, webm_filename)
+        m4a_path = os.path.join(UPLOAD_DIR, m4a_filename)
 
-        # Save the uploaded file as original
+        # Save the uploaded file
+        file_data = await file.read()
         with open(original_path, "wb") as buffer:
-            buffer.write(await file.read())
+            buffer.write(file_data)
 
-        # Copy original to webm (renamed only)
-        shutil.copyfile(original_path, webm_path)
+        # Copy with opposite extension if needed
+        if "audio" in file.content_type:
+            if original_ext == ".webm":
+                shutil.copyfile(original_path, m4a_path)
+                print(f"✅ Copied to: {m4a_filename}")
+            elif original_ext == ".m4a":
+                shutil.copyfile(original_path, webm_path)
+                print(f"✅ Copied to: {webm_filename}")
+            else:
+                # If another audio format, save both versions
+                shutil.copyfile(original_path, webm_path)
+                shutil.copyfile(original_path, m4a_path)
+                print(f"✅ Copied to: {webm_filename} and {m4a_filename}")
 
         print(f"✅ Saved original: {original_filename}")
-        print(f"✅ Renamed copy as: {webm_filename}")
-
-        # Return original filename (.m4a, for example)
         return original_filename
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-
 #get the media
 UPLOAD_DIR = "uploaded_files"
 
