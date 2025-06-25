@@ -1023,61 +1023,6 @@ class MessageCreate(BaseModel):
     media_url: str
     message_type: str
 
-class MessageOut(BaseModel):
-    id: int
-    chat_id: int
-    sender_id: int
-    username: str
-    content: str
-    media_url: str
-    message_type: str
-    time_stamp: str
-
-# DELETE endpoint
-@app.delete("/delete-message/", response_model=MessageOut)
-def delete_message(message_id: int = Query(...), user_id: int = Query(...)):
-    try:
-        conn = get_connection()
-        cursor = conn.cursor()
-
-        # JOIN to get username from users table
-        cursor.execute("""
-            SELECT m.id, m.chat_id, m.sender_id, u.username, m.content, m.media_url, m.message_type, m.created_at
-            FROM messages m
-            JOIN users u ON m.sender_id = u.id
-            WHERE m.id = %s AND m.sender_id = %s 
-        """, (message_id, user_id))
-
-        row = cursor.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Message not found or not authorized to delete.")
-
-        message_data = MessageOut(
-            id=row[0],
-            chat_id=row[1],
-            sender_id=row[2],
-            username=row[3],
-            content=row[4],
-            media_url=row[5],
-            message_type=row[6],
-            time_stamp=str(row[7])
-        )
-
-        # Delete the message
-        cursor.execute("DELETE FROM messages WHERE id = %s", (message_id,))
-        conn.commit()
-
-        return message_data
-
-    except psycopg2.Error as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {e.pgerror}")
-
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
 
 # === POST: Send a new message ===
 @app.post("/messages", response_model=MessageOut)
@@ -1240,7 +1185,7 @@ async def upload_media(
                 print(f"✅ Copied to: {webm_filename} and {m4a_filename}")
 
         print(f"✅ Saved original: {original_filename}")
-        return original_filename
+        return m4a_filename
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
@@ -1257,6 +1202,104 @@ def get_media(link: str = Query(..., description="/uploaded_files/file.png")):
         raise HTTPException(status_code=404, detail="File not found")
 
     return FileResponse(file_path, media_type="application/octet-stream", filename=filename)
+
+class DeleteGroupMessages(BaseModel):
+    id: int
+    groupid: int
+    senderid: int
+    context: str
+    mediaurl: str = None
+    messagetype: str
+    created_at: str
+
+@app.delete("/delete-group-message/", response_model=DeleteGroupMessages)
+def delete_group_message(
+    message_id: int = Query(...),
+    user_id: int = Query(...),
+    group_id: int = Query(...)
+):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # Check if the message exists and was sent by the user in that group
+        cursor.execute("""
+            SELECT id, group_id, sender_id, content, media_url, message_type, created_at
+            FROM group_messages
+            WHERE id = %s AND group_id = %s AND sender_id = %s
+        """, (message_id, group_id, user_id))
+
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Message not found or not authorized to delete.")
+
+        # Build the output response
+        message_data = DeleteGroupMessages(
+            id=row[0],
+            groupid=row[1],
+            senderid=row[2],
+            context=row[3],
+            mediaurl=row[4],
+            messagetype=row[5],
+            created_at=str(row[6])
+        )
+
+        # Delete the message
+        cursor.execute("DELETE FROM group_messages WHERE id = %s", (message_id,))
+        conn.commit()
+
+        return message_data
+        
+class DeleteMessage(BaseModel):
+    id: int
+    chat_id: int
+    sender_id: int
+    content: str
+    media_url: str
+    message_type: str
+    time_stamp: str
+
+# DELETE endpoint
+@app.delete("/delete-message/", response_model=DeleteMessage)
+def delete_message(message_id: int = Query(...), user_id: int = Query(...)):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # JOIN to get username from users table
+        cursor.execute("""
+            SELECT id, chat_id, sender_id, content, media_url, message_type, created_at
+            FROM messages WHERE id = %s AND sender_id = %s 
+        """, (message_id, user_id))
+
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Message not found or not authorized to delete.")
+
+        message_data = DeleteMessage(
+            id=row[0],
+            chat_id=row[1],
+            sender_id=row[2],
+            content=row[3],
+            media_url=row[4],
+            message_type=row[5],
+            time_stamp=str(row[6])
+        )
+
+        # Delete the message
+        cursor.execute("DELETE FROM messages WHERE id = %s", (message_id,))
+        conn.commit()
+
+        return message_data
+
+    except psycopg2.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e.pgerror}")
+
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 # Define allowed origins (use "*" for all, or specify allowed URLs)
 origins = [
