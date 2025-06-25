@@ -1202,7 +1202,6 @@ def get_media(link: str = Query(..., description="/uploaded_files/file.png")):
         raise HTTPException(status_code=404, detail="File not found")
 
     return FileResponse(file_path, media_type="application/octet-stream", filename=filename)
-
 class DeleteGroupMessages(BaseModel):
     id: int
     groupid: int
@@ -1212,11 +1211,12 @@ class DeleteGroupMessages(BaseModel):
     messagetype: str
     created_at: str
 
+
 @app.delete("/delete-group-message/", response_model=DeleteGroupMessages)
 def delete_group_message(
-    message_id: int = Query(...),
-    user_id: int = Query(...),
-    group_id: int = Query(...)
+        message_id: int = Query(...),
+        user_id: int = Query(...),
+        group_id: int = Query(...)
 ):
     try:
         conn = get_connection()
@@ -1249,7 +1249,16 @@ def delete_group_message(
         conn.commit()
 
         return message_data
-        
+    except psycopg2.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e.pgerror}")
+
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
 class DeleteMessage(BaseModel):
     id: int
     chat_id: int
@@ -1258,6 +1267,7 @@ class DeleteMessage(BaseModel):
     media_url: str
     message_type: str
     time_stamp: str
+
 
 # DELETE endpoint
 @app.delete("/delete-message/", response_model=DeleteMessage)
@@ -1300,6 +1310,52 @@ def delete_message(message_id: int = Query(...), user_id: int = Query(...)):
             cursor.close()
         if conn:
             conn.close()
+
+class GroupOut(BaseModel):
+    id: int
+    group_name: str
+    created_by: int
+    created_at: str
+
+@app.delete("/delete-group/", response_model=GroupOut)
+def delete_group(group_id: int = Query(...), user_id: int = Query(...)):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # Check if the group exists and the user is the creator
+        cursor.execute("""
+            SELECT id, group_name, created_by, created_at
+            FROM groups
+            WHERE id = %s AND created_by = %s
+        """, (group_id, user_id))
+
+        group = cursor.fetchone()
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found or you are not authorized to delete it.")
+
+        group_data = GroupOut(
+            id=group[0],
+            group_name=group[1],
+            created_by=group[2],
+            created_at=str(group[3])
+        )
+
+        # Delete the group
+        cursor.execute("DELETE FROM groups WHERE id = %s", (group_id,))
+        conn.commit()
+
+        return group_data
+
+    except psycopg2.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e.pgerror}")
+
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
 
 # Define allowed origins (use "*" for all, or specify allowed URLs)
 origins = [
