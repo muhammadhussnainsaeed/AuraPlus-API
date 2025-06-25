@@ -29,14 +29,21 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Database connection (change these as per your setup)
 conn = psycopg2.connect(
-    dbname="AuraPlus",
+    dbname="aura+",
     user="postgres",
     password="12345",
     host="localhost",      # Or your DB host
     port="5432"            # Default PostgreSQL port
 )
 cursor = conn.cursor()
-
+def get_connection():
+    return psycopg2.connect(
+        dbname="aura+",
+        user="postgres",
+        password="12345",
+        host="localhost",  # Or your DB host
+        port="5432"
+    )
 
 # Request body schema
 class UserCreate(BaseModel):
@@ -1026,6 +1033,51 @@ class MessageOut(BaseModel):
     message_type: str
     time_stamp: str
 
+# DELETE endpoint
+@app.delete("/delete-message/", response_model=MessageOut)
+def delete_message(message_id: int = Query(...), user_id: int = Query(...)):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # JOIN to get username from users table
+        cursor.execute("""
+            SELECT m.id, m.chat_id, m.sender_id, u.username, m.content, m.media_url, m.message_type, m.created_at
+            FROM messages m
+            JOIN users u ON m.sender_id = u.id
+            WHERE m.id = %s AND m.sender_id = %s 
+        """, (message_id, user_id))
+
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Message not found or not authorized to delete.")
+
+        message_data = MessageOut(
+            id=row[0],
+            chat_id=row[1],
+            sender_id=row[2],
+            username=row[3],
+            content=row[4],
+            media_url=row[5],
+            message_type=row[6],
+            time_stamp=str(row[7])
+        )
+
+        # Delete the message
+        cursor.execute("DELETE FROM messages WHERE id = %s", (message_id,))
+        conn.commit()
+
+        return message_data
+
+    except psycopg2.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e.pgerror}")
+
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
 
 # === POST: Send a new message ===
 @app.post("/messages", response_model=MessageOut)
@@ -1188,7 +1240,7 @@ async def upload_media(
                 print(f"✅ Copied to: {webm_filename} and {m4a_filename}")
 
         print(f"✅ Saved original: {original_filename}")
-        return m4a_filename
+        return original_filename
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
@@ -1205,7 +1257,6 @@ def get_media(link: str = Query(..., description="/uploaded_files/file.png")):
         raise HTTPException(status_code=404, detail="File not found")
 
     return FileResponse(file_path, media_type="application/octet-stream", filename=filename)
-
 
 # Define allowed origins (use "*" for all, or specify allowed URLs)
 origins = [
