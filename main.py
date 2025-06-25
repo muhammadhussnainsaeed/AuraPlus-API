@@ -1188,7 +1188,7 @@ async def upload_media(
                 print(f"✅ Copied to: {webm_filename} and {m4a_filename}")
 
         print(f"✅ Saved original: {original_filename}")
-        return original_filename
+        return m4a_filename
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
