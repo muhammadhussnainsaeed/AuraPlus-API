@@ -59,7 +59,7 @@ class MessageCreate(BaseModel):
 class ChatQuery(BaseModel):
     chat_id: int
 
-        
+
 class Usernames(BaseModel):
     username1: str
     username2: str
@@ -186,7 +186,7 @@ async def websocket_chat(websocket: WebSocket):
 
 #websockets for web
 class GroupWebSocketMessage(BaseModel):
-    group_id: int
+    chat_id: int
     sender_id: int
     content: Optional[str] = None
     media_url: Optional[str] = None
@@ -212,7 +212,7 @@ async def websocket_group_chat(websocket: WebSocket):
                     VALUES (%s, %s, %s, %s, %s, NOW())
                     RETURNING id, created_at
                 """, (
-                    message.group_id,
+                    message.chat_id,
                     message.sender_id,
                     message.content,
                     message.media_url,
@@ -228,7 +228,7 @@ async def websocket_group_chat(websocket: WebSocket):
 
                 full_message = {
                     "id": new_id,
-                    "group_id": message.group_id,
+                    "chat_id": message.chat_id,
                     "sender_id": message.sender_id,
                     "username": sender_username,
                     "content": message.content,
@@ -1208,17 +1208,17 @@ def get_media(link: str = Query(..., description="/uploaded_files/file.png")):
 
 
 # Define allowed origins (use "*" for all, or specify allowed URLs)
-# origins = [
-#     "http://localhost:8000",
-#     "http://192.168.100.196:8888",
-#     "*",  # Allow all origins (use with caution)
-# ]
-#
-# # Add CORS middleware
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=origins,  # Allowed origins
-#     allow_credentials=True,
-#     allow_methods=["*"],  # Allow all HTTP methods
-#     allow_headers=["*"],  # Allow all headers
-# )
+origins = [
+    "http://localhost:8000",
+    "http://192.168.100.196:8888",
+    "*",  # Allow all origins (use with caution)
+]
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # Allowed origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
+)
